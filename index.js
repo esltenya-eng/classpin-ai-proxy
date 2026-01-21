@@ -3,46 +3,46 @@ const express = require("express");
 const app = express();
 app.use(express.json());
 
-// ─────────────────────────────
-// 기본 확인용 엔드포인트
-// ─────────────────────────────
+// 배포 확인용(무조건 뜨면 성공)
 app.get("/", (req, res) => {
-  res.send("classspin-ai-proxy is alive");
+  res
+    .status(200)
+    .set("Content-Type", "text/plain; charset=utf-8")
+    .send("classpin-ai-proxy is alive ✅ (root route working)");
 });
 
 app.get("/health", (req, res) => {
-  res.json({ ok: true });
+  res.status(200).json({
+    ok: true,
+    service: "classpin-ai-proxy",
+    hasKey: !!process.env.GEMINI_API_KEY,
+  });
 });
 
-// ─────────────────────────────
-// 환경 변수
-// ─────────────────────────────
+// ★ 이게 핵심: 어떤 경로로 GET을 치든, 배포 확인 문자열이 나오게
+app.get("*", (req, res) => {
+  res
+    .status(200)
+    .set("Content-Type", "text/plain; charset=utf-8")
+    .send(`✅ classpin-ai-proxy reached this container.
+path=${req.path}
+method=${req.method}`);
+});
+
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
 
-// ─────────────────────────────
-// AI 텍스트 처리
-// ─────────────────────────────
 app.post("/ai/text", async (req, res) => {
   try {
-    // 1️⃣ API 키 체크
-    if (!GEMINI_API_KEY) {
-      return res.status(500).json({
-        error: "GEMINI_API_KEY not set",
-        where: "Cloud Run environment variables",
-      });
-    }
-
-    // 2️⃣ 입력값 검증
     const { prompt, mode, targetLang } = req.body || {};
 
-    if (!prompt || typeof prompt !== "string") {
-      return res.status(400).json({
-        error: "prompt is required and must be a string",
-      });
+    if (!GEMINI_API_KEY) {
+      return res.status(500).json({ error: "GEMINI_API_KEY not set" });
+    }
+    if (!prompt) {
+      return res.status(400).json({ error: "prompt is required" });
     }
 
-    // 3️⃣ 시스템 프롬프트 결정
-    let systemPrompt;
+    let systemPrompt = "";
     switch (mode) {
       case "write":
         systemPrompt = "자연스럽고 잘 읽히는 글을 작성하세요.";
@@ -51,73 +51,42 @@ app.post("/ai/text", async (req, res) => {
         systemPrompt = "기존 글의 의미를 유지하면서 더 자연스럽게 다듬어주세요.";
         break;
       case "translate":
-        if (!targetLang) {
-          return res.status(400).json({
-            error: "targetLang is required when mode is translate",
-          });
-        }
-        systemPrompt = `다음 내용을 ${targetLang}로 번역하세요.`;
+        systemPrompt = `다음 내용을 ${targetLang || "한국어"}로 번역하세요.`;
         break;
       default:
         systemPrompt = "자연스럽게 응답하세요.";
     }
 
-    // 4️⃣ Gemini API 호출
-    const url =
-      "https://generativelanguage.googleapis.com/v1beta/models/" +
-      "gemini-1.5-flash:generateContent?key=" +
-      GEMINI_API_KEY;
+    // Node 20은 fetch 내장
+    const response = await fetch(
+      `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${GEMINI_API_KEY}`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          contents: [
+            { role: "user", parts: [{ text: `${systemPrompt}\n\n${prompt}` }] },
+          ],
+        }),
+      }
+    );
 
-    const response = await fetch(url, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        contents: [
-          {
-            role: "user",
-            parts: [{ text: `${systemPrompt}\n\n${prompt}` }],
-          },
-        ],
-      }),
-    });
+    const data = await response.json();
 
-    const data = await response.json().catch(() => null);
-
-    // 5️⃣ Gemini 에러 그대로 반환 (숨기지 않음)
+    // Gemini 에러도 그대로 보여주게(디버깅용)
     if (!response.ok) {
-      return res.status(response.status).json({
-        error: "Gemini API error",
-        status: response.status,
-        geminiResponse: data,
-      });
+      return res.status(response.status).json({ error: "Gemini error", data });
     }
 
-    // 6️⃣ 응답 파싱
-    const result =
-      data?.candidates?.[0]?.content?.parts?.[0]?.text;
-
-    if (!result) {
-      return res.status(502).json({
-        error: "Gemini returned empty response",
-        geminiResponse: data,
-      });
-    }
-
-    // 7️⃣ 정상 응답
-    res.json({ result });
-  } catch (err) {
-    console.error("AI proxy error:", err);
-    res.status(500).json({
-      error: "Internal server error",
-      message: err?.message,
-    });
+    const text = data?.candidates?.[0]?.content?.parts?.[0]?.text || "";
+    return res.json({ result: text });
+  } catch (e) {
+    console.error(e);
+    return res.status(500).json({ error: "AI 처리 중 오류", detail: String(e) });
   }
 });
 
-// ─────────────────────────────
-// 서버 실행 (Cloud Run 필수 패턴)
-// ─────────────────────────────
 const PORT = process.env.PORT || 8080;
 app.listen(PORT, "0.0.0.0", () => {
-  console.log(`AI proxy running on port ${PORT}`);
+  console.log(`AI proxy running on ${PORT}`);
 });
