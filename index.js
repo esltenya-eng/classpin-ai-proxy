@@ -1,3 +1,5 @@
+// fetch import 필요 없음 (Node 18+ 내장)
+
 const express = require("express");
 
 const app = express();
