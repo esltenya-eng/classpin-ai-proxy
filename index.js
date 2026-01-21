@@ -1,8 +1,10 @@
-import express from "express";
-import fetch from "node-fetch";
+const express = require("express");
 
 const app = express();
 app.use(express.json());
+
+app.get("/", (req, res) => res.send("classpin-ai-proxy is alive"));
+app.get("/health", (req, res) => res.json({ ok: true }));
 
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
 
@@ -11,7 +13,6 @@ app.post("/ai/text", async (req, res) => {
     const { prompt, mode, targetLang } = req.body;
 
     let systemPrompt = "";
-
     switch (mode) {
       case "write":
         systemPrompt = "자연스럽고 잘 읽히는 글을 작성하세요.";
@@ -33,19 +34,14 @@ app.post("/ai/text", async (req, res) => {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           contents: [
-            {
-              role: "user",
-              parts: [{ text: `${systemPrompt}\n\n${prompt}` }]
-            }
+            { role: "user", parts: [{ text: `${systemPrompt}\n\n${prompt}` }] }
           ]
-        })
+        }),
       }
     );
 
     const data = await response.json();
-    const text =
-      data.candidates?.[0]?.content?.parts?.[0]?.text || "";
-
+    const text = data?.candidates?.[0]?.content?.parts?.[0]?.text || "";
     res.json({ result: text });
   } catch (e) {
     console.error(e);
@@ -54,6 +50,6 @@ app.post("/ai/text", async (req, res) => {
 });
 
 const PORT = process.env.PORT || 8080;
-app.listen(PORT, () => {
+app.listen(PORT, "0.0.0.0", () => {
   console.log(`AI proxy running on ${PORT}`);
 });
