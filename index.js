@@ -1,131 +1,131 @@
-// index.js
-// Node 18+ (Cloud Run 기본) / fetch 내장
+import express from "express";
+import cors from "cors";
 
-const express = require("express");
 const app = express();
 
-/* =========================
-   🔴 여기에 API KEY 직접 넣기
-   ========================= */
-const GEMINI_API_KEY = "AIzaSyDrLp1X1OMdEh_SLsi1SAJTrjKXneSjpr8";
+// ✅ CORS + JSON body
+app.use(cors({ origin: true }));
+app.use(express.json({ limit: "2mb" }));
 
-/* =========================
-   모델은 검증된 값으로 고정
-   ========================= */
-const GEMINI_MODEL = "gemini-exp-1206";
+// ✅ Cloud Run env
+const GEMINI_API_KEY = process.env.GEMINI_API_KEY || "";
+const RAW_MODEL = process.env.GEMINI_MODEL || "models/gemini-exp-1206";
 
-/* =========================
-   CORS (Classpin만 허용)
-   ========================= */
-const ALLOWED_ORIGINS = [
-  "https://classpin-folder-based-classroom-board-1070949888094.us-west1.run.app",
-  "http://localhost:5173",
-  "http://localhost:3000",
-];
+// ✅ 모델 문자열 정규화: "models/xxx"든 "xxx"든 둘 다 받아서 "models/xxx"로 맞춤
+const MODEL = RAW_MODEL.startsWith("models/") ? RAW_MODEL : `models/${RAW_MODEL}`;
 
-app.use((req, res, next) => {
-  const origin = req.headers.origin;
-
-  if (origin && ALLOWED_ORIGINS.includes(origin)) {
-    res.setHeader("Access-Control-Allow-Origin", origin);
+// ✅ 공통: Gemini 호출
+async function callGeminiGenerateContent({ prompt, systemPrompt }) {
+  if (!GEMINI_API_KEY) {
+    return {
+      ok: false,
+      status: 500,
+      data: { error: "GEMINI_API_KEY is missing in Cloud Run env" },
+    };
   }
 
-  res.setHeader("Access-Control-Allow-Methods", "GET,POST,OPTIONS");
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type");
-  res.setHeader("Access-Control-Max-Age", "3600");
+  const url = `https://generativelanguage.googleapis.com/v1beta/${MODEL}:generateContent?key=${encodeURIComponent(
+    GEMINI_API_KEY
+  )}`;
 
-  if (req.method === "OPTIONS") {
-    return res.status(204).send("");
+  const body = {
+    contents: [
+      {
+        role: "user",
+        parts: [{ text: String(prompt || "") }],
+      },
+    ],
+  };
+
+  // ✅ systemPrompt가 있으면 systemInstruction으로 넣음
+  if (systemPrompt && String(systemPrompt).trim()) {
+    body.systemInstruction = {
+      role: "system",
+      parts: [{ text: String(systemPrompt) }],
+    };
   }
 
-  next();
-});
+  const r = await fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
 
-app.use(express.json());
+  let data = null;
+  try {
+    data = await r.json();
+  } catch {
+    data = { error: "Non-JSON response from Gemini API" };
+  }
 
-/* =========================
-   루트 (살아있는지 확인용)
-   ========================= */
-app.get("/", (req, res) => {
-  res
-    .status(200)
-    .set("Content-Type", "text/plain; charset=utf-8")
-    .send("classpin-ai-proxy is alive ✅");
-});
+  return { ok: r.ok, status: r.status, data };
+}
 
-/* =========================
-   헬스 체크
-   ========================= */
+// ✅ health
 app.get("/health", (req, res) => {
   res.json({
     ok: true,
-    hasKey: GEMINI_API_KEY !== "여기에_너의_실제_API_KEY_붙여넣기",
-    model: `models/${GEMINI_MODEL}`,
+    hasKey: Boolean(GEMINI_API_KEY),
+    model: MODEL,
   });
 });
 
-/* =========================
-   핵심 API
-   POST /ai/text
-   ========================= */
+// ✅ models 목록 프록시 (브라우저에서 /ai/models 열면 models[]가 내려오게)
+app.get("/ai/models", async (req, res) => {
+  if (!GEMINI_API_KEY) {
+    return res.status(500).json({ error: "GEMINI_API_KEY is missing in Cloud Run env" });
+  }
+
+  const url = `https://generativelanguage.googleapis.com/v1beta/models?key=${encodeURIComponent(
+    GEMINI_API_KEY
+  )}`;
+
+  const r = await fetch(url);
+  let data = null;
+  try {
+    data = await r.json();
+  } catch {
+    data = { error: "Non-JSON response from Gemini models endpoint" };
+  }
+
+  return res.status(r.status).json(data);
+});
+
+// ✅ text endpoint: 네가 콘솔에서 치는 그대로 {prompt, mode} 받도록 맞춤
 app.post("/ai/text", async (req, res) => {
   try {
-    const { prompt, mode } = req.body;
+    const { prompt, mode } = req.body || {};
 
-    if (!prompt) {
-      return res.status(400).json({ error: "prompt is required" });
-    }
+    // mode별 systemPrompt (원하면 여기 문구만 바꿔도 됨)
+    const systemPrompt =
+      mode === "refine"
+        ? "You are a helpful editor. Rewrite the user's Korean text more naturally while preserving meaning."
+        : "You are a helpful assistant.";
 
-    let systemPrompt = "자연스럽게 응답하세요.";
-    if (mode === "refine") {
-      systemPrompt = "기존 문장의 의미를 유지하면서 더 자연스럽게 다듬어 주세요.";
-    }
+    const out = await callGeminiGenerateContent({ prompt, systemPrompt });
 
-    const response = await fetch(
-      `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${GEMINI_API_KEY}`,
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          contents: [
-            {
-              role: "user",
-              parts: [
-                { text: `${systemPrompt}\n\n${prompt}` }
-              ],
-            },
-          ],
-        }),
-      }
-    );
-
-    const data = await response.json();
-
-    if (!response.ok) {
-      return res.status(response.status).json({
+    // ✅ Gemini가 에러면 status 그대로 반환 (403/429 그대로 보이게)
+    if (!out.ok) {
+      return res.status(out.status).json({
         error: "Gemini API error",
-        data,
+        data: out.data,
       });
     }
 
+    // ✅ 결과 텍스트 안전 추출
     const text =
-      data?.candidates?.[0]?.content?.parts?.[0]?.text || "";
+      out.data?.candidates?.[0]?.content?.parts?.[0]?.text ??
+      out.data?.candidates?.[0]?.content?.parts?.map((p) => p.text).join("") ??
+      "";
 
-    res.json({ result: text });
-
-  } catch (err) {
-    console.error(err);
-    res.status(500).json({
-      error: "server error",
-      detail: String(err),
-    });
+    return res.json({ result: text });
+  } catch (e) {
+    return res.status(500).json({ error: "AI 처리 중 오류", detail: String(e) });
   }
 });
 
-/* =========================
-   서버 시작
-   ========================= */
+// ✅ listen
 const PORT = process.env.PORT || 8080;
 app.listen(PORT, "0.0.0.0", () => {
-  console.log("Classpin AI proxy running on port", PORT);
+  console.log(`Classpin AI proxy running on port ${PORT}`);
 });
